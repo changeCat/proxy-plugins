@@ -1,0 +1,15 @@
+#!name = QQ 阅读签到与视频福利提醒
+#!desc = 按设备时间提醒签到，点按通知进入 QQ 阅读福利页。
+#!author = changeCat
+#!system = iOS,iPadOS
+#!loon_version = 3.5.1(983)
+#!tag = QQ阅读,提醒
+
+[Argument]
+enabled = switch,true,tag=每日签到提醒
+cron = input,"0 8 * * *",tag=提醒时间
+
+[Script]
+cron ${cron} then script("qq-reading-welfare.js", "checkin") with enable=${enabled}, tag="QQ 阅读签到提醒"
+generic then script("qq-reading-welfare.js", "checkin") with tag="测试签到提醒"
+generic then script("qq-reading-welfare.js", "video") with tag="查看视频福利"
