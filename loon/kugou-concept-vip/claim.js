@@ -259,16 +259,15 @@
         !/^[^\s;&]{8,512}$/.test(auth.token || "") || !/^[A-Za-z0-9._~-]{6,128}$/.test(auth.mid || "") ||
         !/^[A-Za-z0-9._~-]{1,128}$/.test(auth.dfid || "") || !/^[A-Za-z0-9._~-]{1,128}$/.test(auth.uuid || "") ||
         !/^\d{1,8}$/.test(auth.srcappid || "") || !/^\d{1,8}$/.test(auth.clientver || "")) {
-      notify("已保存的 App 接口配置不完整，请重新开启配置捕获并打开 VIP 记录页面。"); return;
+      notify("已保存的配置不完整，请开启“重新捕获配置”并打开 VIP 领取记录页。"); return;
     }
-    if (!native.record) { notify("尚未保存月度查询配置，请开启配置捕获并打开 VIP 记录页面。"); return; }
+    if (!native.record) { notify("请打开酷狗概念版 VIP 领取记录页，插件会自动保存查询配置。"); return; }
     var current = read(AUTH_KEY);
     if (current && current.appid === "3114" && current.userid && current.userid !== auth.userid) {
-      notify("普通捕获与已验签接口属于不同账号，请只打开目标账号的 VIP 记录页面重新学习接口。"); return;
+      notify("已保存的配置属于不同账号，请开启“重新捕获配置”并打开目标账号的 VIP 领取记录页。"); return;
     }
     var today = todayLocal();
     var queryOnly = typeof $argument !== "undefined" && $argument === "query";
-    var initializeClaim = typeof $argument !== "undefined" && $argument === "manual";
     var state = read(STATE_KEY);
     if (!queryOnly && state && state.userid === auth.userid && state.date === today && state.status === "confirmed") {
       notify("今天已确认领取，跳过重复请求。"); return;
@@ -295,23 +294,21 @@
       notify("今天已确认领取，跳过重复请求。"); return;
     }
     var claimConfig = native.claim;
-    var tryingWeb = !claimConfig && initializeClaim;
+    var tryingWeb = !claimConfig;
     if (tryingWeb) {
       if (native.record.algorithm !== "Web") {
-        notify("首次领取需要已保存的 Web 月度查询配置，本次未领取。"); return;
+        notify("请在 App 中领取一次 VIP 以完成配置。"); return;
       }
-      // Initialize from the verified Web session on manual runs; persist only on success.
+      // Both claim triggers reuse the verified Web session. Save the template after success.
       claimConfig = {
         method: "POST", path: "/youth/v1/recharge/receive_vip_listen_song", algorithm: "Web",
         params: Object.assign({}, auth, { source_id: "90139", receive_day: today }),
         body: "", timeUnit: native.record.timeUnit,
-        headers: { "Content-Type": "application/x-www-form-urlencoded" }, source: "manual"
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        source: typeof $argument !== "undefined" && $argument === "manual" ? "manual" : "cron"
       };
       if (native.record.headers && native.record.headers["User-Agent"]) claimConfig.headers["User-Agent"] = native.record.headers["User-Agent"];
-      console.log("首次手动领取：查询已确认今天未领取，使用已保存的 Web 会话，仅提交一次。");
-    }
-    if (!claimConfig) {
-      notify("App 配置查询成功：今天未领取。尚缺领取接口配置，请运行“手动核对并领取 VIP”完成首次领取；本次未提交领取。"); return;
+      console.log("今天未领取，使用已保存的 Web 会话首次领取。");
     }
     write(STATE_KEY, { userid: auth.userid, date: today, status: "uncertain" });
     var result;
@@ -329,9 +326,9 @@
           claimConfig.verifiedAt = new Date().toISOString();
           latest.claim = claimConfig;
           try { write(NATIVE_KEY, latest); }
-          catch (_) { notify("Web 领取请求成功，但领取配置保存失败，暂不能开启自动领取。"); return; }
+          catch (_) { notify("当天 VIP 领取成功，领取配置保存失败。下次领取时会重新生成配置。"); return; }
         }
-        notify("Web 领取请求成功，领取配置已保存。可开启自动领取，之后每天使用此配置。"); return;
+        notify("当天 VIP 领取成功，领取配置已保存。"); return;
       }
       notify("当天 VIP 领取请求成功。");
     } else notify("领取未确认：" + failureDetail(result, auth) + "。今天不会重复提交。");
@@ -341,7 +338,7 @@
     if (typeof $argument !== "undefined" && $argument === "refresh") { await refreshFromRequest(); return; }
     var native = read(NATIVE_KEY);
     if (native && native.version === 1) { await runNative(native); return; }
-    notify("尚未保存签到配置。请开启配置捕获并打开概念版 VIP 记录页面，再手动领取。");
+    notify("尚未保存签到配置。请打开酷狗概念版 VIP 领取记录页，插件会自动保存配置。");
   }
 
   run().catch(function (_) {

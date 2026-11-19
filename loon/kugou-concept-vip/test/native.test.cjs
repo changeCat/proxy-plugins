@@ -35,11 +35,11 @@ function run(file, { data = new Map(), request, response, argument, replies = []
   });
   return { data, calls, logs, notices, finished };
 }
-function learn(data, kind = 'record', { extra = {}, body = '', status = 1, badSignature = false, person = identity, noBody = false } = {}) {
+function learn(data, kind = 'record', { extra = {}, body = '', status = 1, badSignature = false, person = identity, noBody = false, argument = 'true' } = {}) {
   const params = { ...person, clienttime: '1790820000', ...(kind === 'record' ? { latest_limit: '100' } : { source_id: '90139' }), ...extra };
   params.signature = badSignature ? '0'.repeat(32) : sign(params, body);
   return run('capture.js', {
-    data,
+    data, argument,
     request: { method: kind === 'record' ? 'GET' : 'POST', headers: { 'User-Agent': 'iPhone-Test', 'Content-Type': 'application/json' },
       ...(noBody ? {} : { body }), url: 'https://gateway.kugou.com' + (kind === 'record' ? recordPath : claimPath) + '?' + new URLSearchParams(params) },
     response: { status: 200, body: JSON.stringify({ status, error_code: status === 1 ? 0 : 2006, data: {} }) },
@@ -68,16 +68,50 @@ test('learned Web GET preserves full identity and re-signs a fresh query without
   assert.equal(JSON.stringify([result.logs, result.notices, capture.logs, capture.notices]).includes('PRIVATE'), false);
 });
 
-test('a valid record template alone cannot authorize a POST', async () => {
-  const data = new Map(); await learn(data).finished;
-  const result = run('claim.js', { data, replies: [{ body: { status: 1, data: { records: [] } } }] });
-  await result.finished;
-  assert.equal(result.calls.length, 1);
-  assert.equal(data.has(stateKey), false);
-  assert.match(result.notices.at(-1)[2], /尚缺领取接口配置/);
+test('first visit reports readiness once and later visits keep the configured account until explicit recapture', async () => {
+  const data = new Map();
+  const first = learn(data, 'record', { argument: 'false' });
+  await first.finished;
+  assert.equal(first.notices[0][1], '签到配置已就绪');
+  const saved = Array.from(data);
+  const other = { ...identity, userid: '87654321' };
+  for (const person of [identity, other]) {
+    const repeat = learn(data, 'record', { argument: 'false', person });
+    await repeat.finished;
+    assert.equal(repeat.notices.length, 0);
+    assert.deepEqual(Array.from(data), saved);
+  }
+  await learn(data, 'record', { argument: 'true', person: other }).finished;
+  assert.equal(JSON.parse(data.get(nativeKey)).identity.userid, other.userid);
 });
 
-test('only a verified POST template enables daily claim, including signed JSON body', async () => {
+test('automatic capture completes a partial configuration only for the same identity', async () => {
+  const data = new Map();
+  const partial = learn(data, 'claim', { argument: 'false' });
+  await partial.finished;
+  assert.equal(partial.notices[0][1], '签到配置待补全');
+  const saved = Array.from(data);
+  await learn(data, 'record', { argument: 'false', person: { ...identity, userid: '87654321' } }).finished;
+  assert.deepEqual(Array.from(data), saved);
+  const complete = learn(data, 'record', { argument: 'false' });
+  await complete.finished;
+  assert.equal(complete.notices[0][1], '签到配置已就绪');
+  assert.ok(JSON.parse(data.get(nativeKey)).claim);
+});
+
+test('cron can complete the first claim with only an automatically captured Web record, then manual skips it', async () => {
+  const data = new Map(); await learn(data, 'record', { argument: 'false' }).finished;
+  const result = run('claim.js', { data, replies: [{ body: { status: 1, data: { records: [] } } }, { body: { status: 1 } }] });
+  await result.finished;
+  assert.deepEqual(result.calls.map(c => c.method), ['GET', 'POST']);
+  assert.equal(JSON.parse(data.get(nativeKey)).claim.source, 'cron');
+  const manual = run('claim.js', { data, argument: 'manual' });
+  await manual.finished;
+  assert.equal(manual.calls.length, 0);
+  assert.match(manual.notices.at(-1)[2], /今天已确认领取/);
+});
+
+test('daily claim reuses a captured POST template, including signed JSON body', async () => {
   const data = new Map(); await learn(data).finished;
   await learn(data, 'claim', { body: JSON.stringify({ source_id: 90139, receive_day: today }) }).finished;
   const native = JSON.parse(data.get(nativeKey));
@@ -192,7 +226,7 @@ test('manual initialization saves a configuration only after success, then cron 
   assert.equal(new URL(cron.calls[1].options.url).searchParams.get('receive_day'), today);
 });
 
-test('manual initialization stops when today is claimed, record is unknown or query fails', async () => {
+test('first scheduled claim stops when today is claimed, record is unknown or query fails', async () => {
   for (const reply of [
     { body: { status: 1, data: { records: [{ receive_day: today }] } } },
     { body: { status: 1, data: { unknown: true } } },
@@ -200,17 +234,17 @@ test('manual initialization stops when today is claimed, record is unknown or qu
     { error: 'timeout' }
   ]) {
     const data = new Map(); await learn(data).finished;
-    const result = run('claim.js', { data, argument: 'manual', replies: [reply] });
+    const result = run('claim.js', { data, replies: [reply] });
     await result.finished;
     assert.deepEqual(result.calls.map(c => c.method), ['GET']);
     assert.equal(JSON.parse(data.get(nativeKey)).claim, undefined);
   }
 });
 
-test('failed or timed out manual initialization is not learned and cannot be submitted again that day', async () => {
+test('failed or timed out scheduled initialization is not learned or retried manually that day', async () => {
   for (const reply of [{ error: 'timeout' }, { body: { status: 0, error_code: 2006, msg: 'err signature PRIVATE+TOKEN==' } }]) {
     const data = new Map(); await learn(data).finished;
-    const result = run('claim.js', { data, argument: 'manual', replies: [{ body: { status: 1, data: { records: [] } } }, reply] });
+    const result = run('claim.js', { data, replies: [{ body: { status: 1, data: { records: [] } } }, reply] });
     await result.finished;
     assert.deepEqual(result.calls.map(c => c.method), ['GET', 'POST']);
     assert.equal(JSON.parse(data.get(nativeKey)).claim, undefined);
@@ -222,16 +256,18 @@ test('failed or timed out manual initialization is not learned and cannot be sub
   }
 });
 
-test('manual initialization requires learned Web parameters and cron never creates a candidate', async () => {
-  const missing = run('claim.js', { argument: 'manual', data: new Map([['kgcv.auth.v1', JSON.stringify({ ...identity, appid: '3116' })]]) });
-  await missing.finished; assert.equal(missing.calls.length, 0);
-  for (const argument of [undefined, 'query']) {
+test('manual and scheduled claims require a captured claim when only a non-Web record exists', async () => {
+  for (const argument of [undefined, 'manual']) {
     const data = new Map(); await learn(data).finished;
+    const native = JSON.parse(data.get(nativeKey));
+    native.record.algorithm = 'Android Lite';
+    data.set(nativeKey, JSON.stringify(native));
     const result = run('claim.js', { data, argument, replies: [{ body: { status: 1, data: { records: [] } } }] });
     await result.finished;
     assert.deepEqual(result.calls.map(c => c.method), ['GET']);
     assert.equal(data.has(stateKey), false);
     assert.equal(JSON.parse(data.get(nativeKey)).claim, undefined);
+    assert.match(result.notices.at(-1)[2], /在 App 中领取一次/);
   }
 });
 
@@ -252,11 +288,11 @@ test('successful manual initialization does not overwrite a changed session', as
   assert.match(result.notices.at(-1)[2], /会话已改变/);
 });
 
-test('overlapping queries see the pending mutation before submitting another claim', async () => {
+test('overlapping manual and scheduled runs submit the first claim only once', async () => {
   const data = new Map(); await learn(data).finished;
   const replies = () => [{ body: { status: 1, data: { records: [] } } }, { body: { status: 1 } }];
   const first = run('claim.js', { data, argument: 'manual', replies: replies() });
-  const second = run('claim.js', { data, argument: 'manual', replies: replies() });
+  const second = run('claim.js', { data, replies: replies() });
   await Promise.all([first.finished, second.finished]);
   assert.equal([...first.calls, ...second.calls].filter(c => c.method === 'POST').length, 1);
 });
@@ -398,7 +434,7 @@ test('legacy credentials alone never trigger Android fallback requests', async (
     const result = run('claim.js', { data: new Map([['kgcv.auth.v1', JSON.stringify({ ...identity, appid })]]) });
     await result.finished;
     assert.equal(result.calls.length, 0);
-    assert.match(result.notices.at(-1)[2], /配置捕获/);
+    assert.match(result.notices.at(-1)[2], /VIP 领取记录页/);
   }
 });
 

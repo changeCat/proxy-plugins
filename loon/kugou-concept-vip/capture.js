@@ -1,4 +1,4 @@
-/* global $request, $response, $persistentStore, $notification, $done, console */
+/* global $request, $response, $argument, $persistentStore, $notification, $done, console */
 // Verify locally; only learn allowlisted VIP endpoints after a successful signed response.
 (function () {
   "use strict";
@@ -85,6 +85,11 @@
     var route = /^https:\/\/gateway\.kugou\.com(\/youth\/v1\/(?:activity\/get_month_vip_record|recharge\/receive_vip_listen_song))(?:\?([^#]*))?$/i.exec(url);
     var method = String($request.method).toUpperCase();
     if (!route || url.length > 8192 || ["GET", "POST"].indexOf(method) < 0) return;
+    // Older plugin definitions only invoked this script when capture was explicitly enabled.
+    var recapture = typeof $argument === "undefined" || String($argument) === "true";
+    var previous;
+    try { previous = JSON.parse($persistentStore.read(NATIVE_KEY) || "null"); } catch (_) { previous = null; }
+    if (!recapture && previous && previous.record && (previous.record.algorithm === "Web" || previous.claim)) return;
     if (Number($response.status) !== 200 || typeof $response.body !== "string" || $response.body.length >= 262144) return;
     var response = JSON.parse($response.body);
     if (!response || Number(response.status) !== 1 || Number(response.error_code || 0) !== 0 || Number(response.errcode || 0) !== 0) return;
@@ -101,14 +106,14 @@
         var pairs = Object.keys(params).sort().map(function (key) { return key + "=" + params[key]; });
         if (profile.web) pairs.sort();
         if (md5(profile.salt + pairs.join("") + body + profile.salt) === signature.toLowerCase()) {
-          var result = learn(route[1], method, params, body, profile.name);
+          var result = learn(route[1], method, params, body, profile.name, previous, recapture);
           if (result) console.log(result);
           return;
         }
       }
     }
   }
-  function learn(path, method, params, body, algorithm) {
+  function learn(path, method, params, body, algorithm, previous, recapture) {
     var kind = path === "/youth/v1/activity/get_month_vip_record" && method === "GET" ? "record" :
       path === "/youth/v1/recharge/receive_vip_listen_song" && method === "POST" ? "claim" : "";
     if (!kind) return "";
@@ -134,9 +139,9 @@
     }
     var identity = {};
     common.forEach(function (k) { identity[k] = params[k]; });
-    var previous;
-    try { previous = JSON.parse($persistentStore.read(NATIVE_KEY) || "null"); } catch (_) { previous = null; }
-    if (!previous || JSON.stringify(previous.identity) !== JSON.stringify(identity)) previous = { version: 1, identity: identity };
+    var sameIdentity = previous && previous.identity && common.every(function (key) { return previous.identity[key] === identity[key]; });
+    if (!recapture && previous && (!sameIdentity || previous[kind])) return "";
+    if (!sameIdentity) previous = { version: 1, identity: identity };
     var savedParams = {};
     Object.keys(params).forEach(function (k) { if (k !== "clienttime") savedParams[k] = params[k]; });
     var headers = {};
@@ -149,7 +154,13 @@
       timeUnit: params.clienttime.length === 13 ? "ms" : "s", headers: headers, verifiedAt: new Date().toISOString() };
     if (!$persistentStore.write(JSON.stringify(previous), NATIVE_KEY)) return "配置保存失败";
     $persistentStore.write(JSON.stringify(identity), "kgcv.auth.v1");
-    if (!hadConfig) $notification.post("酷狗概念版", "签到配置已保存", kind === "record" ? "月度记录查询配置已保存，请关闭配置捕获并手动领取 VIP。" : "当天领取配置已保存，仍需验证脚本请求。");
+    var ready = previous.record && (previous.record.algorithm === "Web" || previous.claim);
+    var message = ready ? "可以手动领取，也可以开启自动领取。" :
+      previous.record ? "请在酷狗 App 中领取一次 VIP 以完成配置。" : "请打开酷狗概念版 VIP 领取记录页。";
+    if (ready && recapture) message += "请关闭捕获开关。";
+    if (!hadConfig || typeof $argument !== "undefined") {
+      $notification.post("酷狗概念版", ready ? "签到配置已就绪" : "签到配置待补全", message);
+    }
     return kind === "record" ? "月度查询配置已保存" : "当天领取配置已保存";
   }
   try {
